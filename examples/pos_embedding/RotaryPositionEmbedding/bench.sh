@@ -1,18 +1,18 @@
 #!/bin/bash
 # bench.sh — RoPE 性能对比：TileLang vs torch_npu.npu_rotary_mul
 #
-# 用 msprof 采集 device Task Duration。
+# 用 msprof op 算子级采集 Task Duration（warm-up 后平均）。
 # 加速比 = cann_latency / tilelang_latency  (>1.0 表示 TileLang 更快)。
 #
-# 两侧都调 python rope_half_interleaved.py --perf --side {tl|cann}
-# TileLang 侧: tilelang_rope (自定义 kernel)
-# CANN 侧:    torch_npu.npu_rotary_mul (底层 aclnnRotaryPositionEmbedding)
+# 两侧都调 python rope_half_interleaved.py --perf --side {tl|cann}（单次 launch）
+# msprof op 通过 --warm-up 预热、--launch-count 控制采集次数。
 #
 # 用法：
-#   bash bench.sh                        # 跑默认 shape 组（含 layout×dtype 交叉）
-#   bash bench.sh --list                 # 列出所有 shape
-#   bash bench.sh --shape "4 64 128 128" --layout half
-#   bash bench.sh --op-type-tl kernel_kernel --op-type-ac RotaryPositionEmbedding
+#   bash bench.sh                                            # 跑默认 shape 组
+#   bash bench.sh --list                                     # 列出所有 shape
+#   bash bench.sh --shape "4 64 128 128" --layout half       # 单 shape
+#   bash bench.sh --warmup 10 --launch-count 50              # 自定义预热/采集次数
+#   bash bench.sh --kernel-tl kernel_kernel --kernel-cann RotaryPositionEmbedding
 #
 # 依赖：msprof 在 PATH 中（source CANN 环境变量）。
 
@@ -21,27 +21,31 @@ set -euo pipefail
 # ======================== 参数解析 ========================
 LAYOUT="half"
 DTYPE="float16"
-OP_TYPE_TL="kernel_kernel"
-OP_TYPE_AC="RotaryPositionEmbedding"
+KERNEL_TL="kernel_kernel"
+KERNEL_CANN="RotaryPositionEmbedding"
 OUTPUT_DIR="./msprof_output"
 CUSTOM_SHAPE=""
 LIST_ONLY=false
 TIMEOUT=600
 PYTHON_BIN="python3"
+WARMUP=5
+LAUNCH_COUNT=20
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --layout)        LAYOUT="$2"; shift 2 ;;
         --dtype)         DTYPE="$2"; shift 2 ;;
-        --op-type-tl)    OP_TYPE_TL="$2"; shift 2 ;;
-        --op-type-ac)    OP_TYPE_AC="$2"; shift 2 ;;
+        --kernel-tl)     KERNEL_TL="$2"; shift 2 ;;
+        --kernel-cann)   KERNEL_CANN="$2"; shift 2 ;;
         --output)        OUTPUT_DIR="$2"; shift 2 ;;
         --shape)         CUSTOM_SHAPE="$2"; shift 2 ;;
         --list)          LIST_ONLY=true; shift ;;
         --timeout)       TIMEOUT="$2"; shift 2 ;;
         --python)        PYTHON_BIN="$2"; shift 2 ;;
+        --warmup)        WARMUP="$2"; shift 2 ;;
+        --launch-count)  LAUNCH_COUNT="$2"; shift 2 ;;
         -h|--help)
-            grep '^#' "$0" | head -20
+            grep '^#' "$0" | head -22
             exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
@@ -63,11 +67,6 @@ fi
 
 # ======================== Shape 组 ========================
 # 格式: "name|shape|layout|dtype"
-# - shape: TND 用 4 个数 (BS H HS RD)，BSND 用 5 个数 (B S H HS RD)
-# - layout: half|interleaved（留空则用全局 --layout）
-# - dtype:  float16|bfloat16|float32（留空则用全局 --dtype）
-#
-# 交叉测试矩阵: half×fp16, half×bf16, interleaved×fp16, interleaved×bf16, bsnd
 DEFAULT_SHAPES=(
     # --- half × fp16 (主力场景) ---
     "decode_bs1|1 32 128 128|half|float16"
@@ -111,85 +110,48 @@ fi
 
 # ======================== 工具函数 ========================
 
-# 查找最新的 PROF_*/mindstudio_profiler_output/op_summary_*.csv
-find_csv() {
-    local dir="$1" pattern="$2"
-    local matches
-    matches=$(ls -t "$dir"/PROF_*/mindstudio_profiler_output/${pattern} 2>/dev/null || true)
-    if [[ -n "$matches" ]]; then
-        echo "$matches" | head -1
+# 从 msprof op 的 stdout 提取 "Task Duration(us): <value>"
+# msprof op 输出格式: "Task Duration(us): 7.520150"
+parse_task_duration() {
+    local log_file="$1"
+    # grep + sed 提取数值
+    local val
+    val=$(grep -oP 'Task Duration\(us\):\s*\K[\d.]+' "$log_file" | head -1)
+    if [[ -n "$val" ]]; then
+        printf "%.3f" "$val"
+    else
+        echo "N/A"
     fi
 }
 
-# 从 op_summary_*.csv 提取指定 Op Type 的所有 Task Duration(us)
-parse_duration_us() {
-    local out_dir="$1" op_type="$2"
-
-    "$PYTHON_BIN" - "$out_dir" "$op_type" <<'PYEOF'
-import csv, glob, os, sys
-
-out_dir, op_type = sys.argv[1], sys.argv[2]
-
-# 1. op_summary: one row per launch
-pattern = os.path.join(out_dir, "PROF_*", "mindstudio_profiler_output", "op_summary_*.csv")
-files = glob.glob(pattern)
-if files:
-    target = max(files, key=os.path.getctime)
-    durations = []
-    with open(target, encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            ot = (row.get("OP Type") or row.get("Op Type") or "").strip()
-            if ot == op_type:
-                val = row.get("Task Duration(us)") or row.get("Op Duration(us)") or ""
-                if val and val != "N/A":
-                    try: durations.append(float(val))
-                    except ValueError: pass
-    if durations:
-        avg = sum(durations) / len(durations)
-        print(f"{avg:.3f}")
-        sys.exit(0)
-
-print("N/A")
-PYEOF
-}
-
-# 打印某次 msprof 采集到的所有 Op Type（调试用）
-list_available_ops() {
-    local out_dir="$1"
-    local csv
-    csv=$(find_csv "$out_dir" "op_statistic_*.csv")
-    if [[ -z "$csv" ]]; then
-        echo "    (no op_statistic CSV found under $out_dir)"
-        return
-    fi
-    echo "    Available Op Types in $(basename "$csv"):"
-    "$PYTHON_BIN" - "$csv" <<'PYEOF'
-import csv, sys
-with open(sys.argv[1], encoding="utf-8") as f:
-    for row in csv.DictReader(f):
-        ot = row.get("OP Type") or row.get("Op Type") or "?"
-        tt = row.get("Total Time(us)") or "?"
-        c  = row.get("count") or row.get("Count") or ""
-        print(f"      {ot}: Total={tt} us  count={c}")
-PYEOF
-}
-
-# 跑一次 msprof 采集
+# 跑 msprof op 采集
 # $1=side(tl|cann) $2=shape_str $3=layout $4=dtype $5=out_dir
-run_msprof() {
+run_msprof_op() {
     local side="$1" shape_str="$2" layout="$3" dtype="$4" out_dir="$5"
+    rm -rf "$out_dir"
     mkdir -p "$out_dir"
+    chmod 700 "$out_dir"
 
-    local app_cmd="$PYTHON_BIN $PERF_SCRIPT --perf --side $side --shape $shape_str --layout $layout --dtype $dtype"
-    local cmd="msprof --output=$out_dir --application=\"$app_cmd\""
+    local kernel_name
+    if [[ "$side" == "tl" ]]; then
+        kernel_name="$KERNEL_TL"
+    else
+        kernel_name="$KERNEL_CANN"
+    fi
 
-    echo "  > msprof $side (layout=$layout dtype=$dtype)..."
-    if ! timeout "$TIMEOUT" bash -c "$cmd" >"$out_dir/msprof.log" 2>&1; then
-        echo "  [X] msprof failed for $side (see $out_dir/msprof.log)"
+    echo "  > msprof op $side (warm-up=$WARMUP launch-count=$LAUNCH_COUNT)..."
+    if ! timeout "$TIMEOUT" msprof op \
+        --kernel-name="$kernel_name" \
+        --warm-up="$WARMUP" \
+        --launch-count="$LAUNCH_COUNT" \
+        --output="$out_dir" \
+        "$PYTHON_BIN" "$PERF_SCRIPT" --perf --side "$side" --shape $shape_str --layout "$layout" --dtype "$dtype" \
+        >"$out_dir/msprof.log" 2>&1; then
+        echo "  [X] msprof op failed for $side (see $out_dir/msprof.log)"
         tail -5 "$out_dir/msprof.log" 2>/dev/null | sed 's/^/    /'
         return 1
     fi
-    sleep 2  # wait for CSV flush
+    sleep 1
     return 0
 }
 
@@ -198,7 +160,9 @@ run_msprof() {
 echo "================================================================"
 echo "RoPE Benchmark: TileLang vs torch_npu.npu_rotary_mul"
 echo "================================================================"
-echo "Op Types:   TL=$OP_TYPE_TL  CANN=$OP_TYPE_AC"
+echo "Kernel:     TL=$KERNEL_TL  CANN=$KERNEL_CANN"
+echo "Warm-up:    $WARMUP"
+echo "Launch:     $LAUNCH_COUNT"
 echo "Script:     $PERF_SCRIPT"
 echo "Output:     $OUTPUT_DIR"
 echo "PYTHONPATH: $PYTHONPATH"
@@ -207,7 +171,7 @@ echo "================================================================"
 # 结果汇总 CSV
 SUMMARY="$OUTPUT_DIR/summary.csv"
 mkdir -p "$OUTPUT_DIR"
-echo "name,shape,layout,dtype,tl_us,ac_us,speedup" > "$SUMMARY"
+echo "name,shape,layout,dtype,tl_us,cann_us,speedup" > "$SUMMARY"
 
 for c in "${CASES[@]}"; do
     name="${c%%|*}"; rest="${c#*|}"
@@ -218,40 +182,40 @@ for c in "${CASES[@]}"; do
     echo "[$name] shape=[$shape_str] layout=$l dtype=$d"
 
     tl_dir="$OUTPUT_DIR/${name}_tl"
-    ac_dir="$OUTPUT_DIR/${name}_ac"
+    cann_dir="$OUTPUT_DIR/${name}_cann"
 
     # --- TileLang ---
     tl_us=""
-    if run_msprof "tl" "$shape_str" "$l" "$d" "$tl_dir"; then
-        tl_us=$(parse_duration_us "$tl_dir" "$OP_TYPE_TL")
+    if run_msprof_op "tl" "$shape_str" "$l" "$d" "$tl_dir"; then
+        tl_us=$(parse_task_duration "$tl_dir/msprof.log")
         if [[ "$tl_us" == "N/A" || -z "$tl_us" ]]; then
-            echo "  [!] Op Type '$OP_TYPE_TL' not found for TileLang"
-            list_available_ops "$tl_dir"
+            echo "  [!] Task Duration not found for TileLang"
+            grep -i "error\|fail\|warn" "$tl_dir/msprof.log" 2>/dev/null | head -3 | sed 's/^/    /'
         fi
     fi
     echo "  TileLang:   ${tl_us:-N/A} us"
 
-    # --- CANN (torch_npu.npu_rotary_mul) ---
-    ac_us=""
-    if run_msprof "cann" "$shape_str" "$l" "$d" "$ac_dir"; then
-        ac_us=$(parse_duration_us "$ac_dir" "$OP_TYPE_AC")
-        if [[ "$ac_us" == "N/A" || -z "$ac_us" ]]; then
-            echo "  [!] Op Type '$OP_TYPE_AC' not found for CANN"
-            list_available_ops "$ac_dir"
+    # --- CANN ---
+    cann_us=""
+    if run_msprof_op "cann" "$shape_str" "$l" "$d" "$cann_dir"; then
+        cann_us=$(parse_task_duration "$cann_dir/msprof.log")
+        if [[ "$cann_us" == "N/A" || -z "$cann_us" ]]; then
+            echo "  [!] Task Duration not found for CANN"
+            grep -i "error\|fail\|warn" "$cann_dir/msprof.log" 2>/dev/null | head -3 | sed 's/^/    /'
         fi
     fi
-    echo "  CANN:       ${ac_us:-N/A} us"
+    echo "  CANN:       ${cann_us:-N/A} us"
 
     # --- Speedup ---
     speedup=""
-    if [[ -n "$tl_us" && -n "$ac_us" && "$tl_us" != "N/A" && "$ac_us" != "N/A" ]]; then
-        speedup=$("$PYTHON_BIN" -c "print(f'{$ac_us/$tl_us:.2f}x')")
+    if [[ -n "$tl_us" && -n "$cann_us" && "$tl_us" != "N/A" && "$cann_us" != "N/A" ]]; then
+        speedup=$("$PYTHON_BIN" -c "print(f'{$cann_us/$tl_us:.2f}x')")
     else
         speedup="N/A"
     fi
     echo "  Speedup:    $speedup  (cann / tilelang, >1.0 = TileLang faster)"
 
-    echo "$name,\"$shape_str\",$l,$d,${tl_us:-N/A},${ac_us:-N/A},$speedup" >> "$SUMMARY"
+    echo "$name,\"$shape_str\",$l,$d,${tl_us:-N/A},${cann_us:-N/A},$speedup" >> "$SUMMARY"
 done
 
 echo ""
