@@ -22,12 +22,11 @@ import tilelang.language as T
 import torch
 import torch_npu
 
-# ========== Pass Configs (Developer mode, auto-sync) ==========
+# ========== Pass Configs (Developer mode, pure Vector pipeline) ==========
 pass_configs = {
     tilelang.PassConfigKey.TL_ASCEND_AUTO_SYNC: True,
     tilelang.PassConfigKey.TL_ASCEND_MEMORY_PLANNING: True,
-    tilelang.PassConfigKey.TL_ASCEND_AUTO_CV_SYNC: True,
-    tilelang.PassConfigKey.TL_ASCEND_AUTO_CV_COMBINE: True,
+    tilelang.PassConfigKey.TL_ASCEND_AUTO_CV_COMBINE: True,  # needed for reinterpretcast buffer merge
 }
 
 NUM_CORES = 48
@@ -72,8 +71,7 @@ def rope_kernel(M, block_M, num_blocks, total_chunks, sc_rows, hidden_size, rope
         cos: T.Tensor([sc_rows, rope_dim], dtype),  # type: ignore
     ):
         with T.Kernel(num_blocks, is_npu=True) as (cid, vid):
-            # ===== Buffer allocation (all unconditional; MEMORY_PLANNING reclaims
-            #       unused mask buffers for the half layout) =====
+            # ===== Buffer allocation =====
             x_half_ub = T.alloc_shared([row_per_vec, rope_dim], dtype)
             x_ub = T.alloc_shared([row_per_vec, rope_dim], ACC_DTYPE)
             sin_ub = T.alloc_shared([1, rope_dim], ACC_DTYPE)
@@ -84,36 +82,37 @@ def rope_kernel(M, block_M, num_blocks, total_chunks, sc_rows, hidden_size, rope
             cos_block_ub = T.alloc_shared([row_per_vec, rope_dim], ACC_DTYPE)
             x_rotate_ub = T.alloc_shared([row_per_vec, rope_dim], ACC_DTYPE)
             out_ub = T.alloc_shared([row_per_vec, rope_dim], ACC_DTYPE)
-            # Mask buffers (used by interleaved gather; unused for half)
-            mask_ub = T.alloc_shared([row_per_vec, rope_dim], MASK_DTYPE)
+            out_half_ub = T.alloc_shared([row_per_vec, rope_dim], dtype)
+            # Gather offset (interleaved only)
+            mask_ub = T.alloc_shared([row_per_vec, rope_dim], MASK_DTYPE)  # reinterpretcast target + gather offset
             idx_ub = T.alloc_shared([row_per_vec, rope_dim], "int32")
-            tmp_ub_i16 = T.alloc_shared([row_per_vec, rope_dim], "int16")
-            ones_mask_ub = T.alloc_shared([row_per_vec, rope_dim], "int16")
+            ones_ub = T.alloc_shared([row_per_vec, rope_dim], "int16")
             mask_ub_i16 = T.alloc_shared([row_per_vec, rope_dim], "int16")
             mask_ub_f32 = T.alloc_shared([row_per_vec, rope_dim], "float32")
             mask_ub_i32 = T.alloc_shared([row_per_vec, rope_dim], "int32")
-            # sin_mask (1D UB, needs scalar element access)
-            sin_mask_ub = T.alloc_ub(rope_dim, ACC_DTYPE)
+            # sin_mask (both layouts)
+            sin_mask_ub = T.alloc_shared([1, rope_dim], ACC_DTYPE)
 
-            # ===== NPU-internal gather-mask generation (Interleaved only) =====
+            # ===== Gather offset + sin_mask generation =====
             if layout == "interleaved":
-                T.tile.createvecindex(idx_ub, 0)  # [0,1,2,...]
-                T.copy(idx_ub, tmp_ub_i16)
-                T.tile.fill(ones_mask_ub, 1)
-                T.tile.bitwise_xor(mask_ub_i16, tmp_ub_i16, ones_mask_ub)  # [1,0,3,2,...]
+                # Gather offset: [1,0,3,2,...] as uint32 byte offsets
+                T.tile.createvecindex(idx_ub, 0)
+                T.copy(idx_ub, mask_ub_i16)  # i32→i16 truncation
+                T.tile.fill(ones_ub, 1)
+                T.tile.bitwise_xor(mask_ub_i16, mask_ub_i16, ones_ub)
                 T.copy(mask_ub_i16, mask_ub_f32)
                 T.copy(mask_ub_f32, mask_ub_i32)
-                T.tile.mul(mask_ub_i32, mask_ub_i32, 4)  # byte offset (fp32=4B)
+                T.tile.mul(mask_ub_i32, mask_ub_i32, 4)
                 T.reinterpretcast(mask_ub, mask_ub_i32, "uint32_t")
 
-            # ===== NPU-internal sin_mask generation =====
+            # sin_mask: interleaved [-1,+1,-1,+1,...], half [-1,...,-1,+1,...,+1]
             T.tile.fill(sin_mask_ub, -1.0)
             if layout == "interleaved":
-                for i in T.serial(0, half):
-                    sin_mask_ub[2 * i + 1] = 1.0  # [-1,+1,-1,+1,...]
-            else:  # half
-                for i in T.serial(0, half):
-                    sin_mask_ub[half + i] = 1.0  # [-1,...,-1,+1,...,+1]
+                for i in T.Parallel(half):
+                    sin_mask_ub[0, 2 * i + 1] = 1.0
+            else:
+                for i in T.Parallel(half):
+                    sin_mask_ub[0, half + i] = 1.0
 
             # ===== Chunk loop =====
             for chunk in T.serial(0, chunks_per_block):
@@ -122,7 +121,7 @@ def rope_kernel(M, block_M, num_blocks, total_chunks, sc_rows, hidden_size, rope
                     row_x = chunk_idx * block_M + vid * row_per_vec
                     row_sin_cos = (row_x // head_num) % sc_rows
 
-                    # --- Load x (fast path vs tail-guard path) ---
+                    # --- Load x ---
                     if row_x + row_per_vec <= M:
                         if dim_start == 0:
                             T.copy(x[row_x : row_x + row_per_vec, :], x_half_ub)
@@ -154,14 +153,14 @@ def rope_kernel(M, block_M, num_blocks, total_chunks, sc_rows, hidden_size, rope
                     else:
                         T.copy(cos_half_ub, cos_ub)
 
-                    # --- Apply sin_mask (in-place) ---
-                    T.tile.mul(sin_ub[0, :], sin_ub[0, :], sin_mask_ub)
+                    # --- Apply sin_mask ---
+                    T.tile.mul(sin_ub[0, :], sin_ub[0, :], sin_mask_ub[0, :])
 
-                    # --- Broadcast sin/cos to [row_per_vec, rope_dim] ---
+                    # --- Broadcast sin/cos ---
                     T.tile.broadcast(sin_block_ub, sin_ub)
                     T.tile.broadcast(cos_block_ub, cos_ub)
 
-                    # --- Rotate x (layout branch) ---
+                    # --- Rotate x ---
                     if layout == "interleaved":
                         T.tile.gather(x_rotate_ub, x_ub, mask_ub, 0)
                     else:  # half — copy-swap
@@ -174,25 +173,26 @@ def rope_kernel(M, block_M, num_blocks, total_chunks, sc_rows, hidden_size, rope
                     T.tile.mul(x_rotate_ub, x_rotate_ub, sin_block_ub)
                     T.tile.add(out_ub, out_ub, x_rotate_ub)
 
-                    # --- Downcast and write back ---
+                    # --- Downcast to out_half_ub ---
                     if need_cast:
-                        T.tile.cast(x_half_ub, out_ub, "CAST_RINT", x_elem_count)
+                        T.tile.cast(out_half_ub, out_ub, "CAST_RINT", x_elem_count)
                     else:
-                        T.copy(out_ub, x_half_ub)
+                        T.copy(out_ub, out_half_ub)
 
+                    # --- Write back ---
                     if row_x + row_per_vec <= M:
                         if dim_start == 0:
-                            T.copy(x_half_ub, x[row_x : row_x + row_per_vec, :])
+                            T.copy(out_half_ub, x[row_x : row_x + row_per_vec, :])
                         else:
                             for i in T.serial(0, row_per_vec):
-                                T.copy(x_half_ub[i, :], x[row_x + i, dim_start:])
+                                T.copy(out_half_ub[i, :], x[row_x + i, dim_start:])
                     else:
                         for i in T.serial(0, row_per_vec):
                             if row_x + i < M:
                                 if dim_start == 0:
-                                    T.copy(x_half_ub[i, :], x[row_x + i, :])
+                                    T.copy(out_half_ub[i, :], x[row_x + i, :])
                                 else:
-                                    T.copy(x_half_ub[i, :], x[row_x + i, dim_start:])
+                                    T.copy(out_half_ub[i, :], x[row_x + i, dim_start:])
 
     return kernel
 
@@ -216,7 +216,7 @@ def select_block_M(head_num, rope_dim, layout):
     7 mask buffers (~68KB), so factor=18.
     """
     UB_LIMIT = 196608  # 192KB
-    factor = 22 if layout == "interleaved" else 18
+    factor = 21 if layout == "interleaved" else 19
     for bm in [64, 32, 16, 8, 4, 2]:
         rpv = bm // 2
         if head_num % rpv == 0 and bm * rope_dim * factor <= UB_LIMIT:
