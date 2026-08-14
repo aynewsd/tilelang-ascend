@@ -204,13 +204,6 @@ def select_block_M(head_num, rope_dim, layout):
     Constraints:
       - head_num % (block_M // 2) == 0  (sin/cos broadcast correctness)
       - block_M * rope_dim * factor <= 192KB  (UB capacity)
-
-    Factor models total allocation (not peak-after-reuse).  Empirically,
-    AscendMemoryPlanning's LinearScanAllocator does not aggressively overlap
-    non-overlapping lifetimes (e.g. mask-generation temporaries remain
-    resident during chunk processing), so the effective constraint is close
-    to the sum of all alloc_shared/alloc_ub buffers.
-
     Verified: block_M=64, rope_dim=256, interleaved (total ~356KB) crashes
     at compile time; block_M=32 (total ~178KB) passes.  Half layout omits
     7 mask buffers (~68KB), so factor=18.
