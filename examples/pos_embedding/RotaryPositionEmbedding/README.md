@@ -41,15 +41,13 @@ out = x * cos + rotate(x) * sin_signed
 ## 文件清单
 
 
-| 文件                       | 说明                                                                             |
-| -------------------------- | -------------------------------------------------------------------------------- |
-| `rope_half_interleaved.py` | TileLang RoPE kernel + Python wrapper + 精度测试（L0/L1/L2/boundary）+ perf 模式 |
-| `bench.sh`                 | 性能对比编排：msprof op 算子级采集，两侧分别跑，计算加速比                       |
-| `aot_rope.py`              | AOT 编译脚本：lower kernel → LibraryGenerator →`rope_lib.so`                   |
-| `test_aot_rope.py`         | AOT 测试：ctypes 加载 .so + 精度验证                                             |
-| `pto_rope.py`              | PTO 后端测试：`target="pto"` Expert 模式 + 精度验证                             |
-| `README.md`                | 本文件                                                                           |
-
+| 文件                       | 说明                                                                                 |
+| -------------------------- | ------------------------------------------------------------------------------------ |
+| `rope_half_interleaved.py` | TileLang RoPE kernel + Python wrapper + 精度测试（L0/L1/L2/boundary）+ perf 模式     |
+| `bench.sh`                 | 性能对比编排：msprof op 算子级采集，两侧分别跑，计算加速比                           |
+| `aot_rope.py`              | AOT 编译 + 测试：lower kernel → LibraryGenerator →`rope_lib.so`，`--test` 验证精度 |
+| `pto_rope.py`              | PTO 后端测试：`target="pto"` Expert 模式 + 精度验证                                  |
+| `README.md`                | 本文件                                                                               |
 
 ## 快速开始
 
@@ -88,8 +86,8 @@ bash bench.sh --warmup 10 --launch-count 50      # 自定义预热/采集次数
 # 编译为 .so（脱离 Python/tilelang 运行时）
 python aot_rope.py --shape 16 64 512 256 --layout half --dtype float16 -o rope_lib.so
 
-# ctypes 加载并测试
-python test_aot_rope.py --shape 16 64 512 256 --layout half --dtype float16 --lib ./rope_lib.so
+# 编译 + 立即测试
+python aot_rope.py --shape 16 64 512 256 --layout half --dtype float16 --test
 ```
 
 ### 5. PTO 后端测试

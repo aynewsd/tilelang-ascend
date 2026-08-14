@@ -17,7 +17,6 @@ import sys
 import tilelang
 import tilelang.language as T
 import torch
-import torch_npu
 
 sys.path.insert(0, ".")
 from rope_half_interleaved import cann_rope_ref, check_precision, select_block_M  # noqa: E402
@@ -47,7 +46,7 @@ def rope_kernel_pto(M, block_M, num_blocks, total_chunks, sc_rows, hidden_size, 
     row_per_vec = block_M // VEC_NUM
     half = rope_dim // 2
     ACC_DTYPE = "float32"
-    MASK_DTYPE = "uint32"
+    # MASK_DTYPE = "uint32"
     need_cast = dtype != "float32"
 
     chunks_per_block = (total_chunks + num_blocks - 1) // num_blocks
@@ -60,131 +59,129 @@ def rope_kernel_pto(M, block_M, num_blocks, total_chunks, sc_rows, hidden_size, 
         sin: T.Tensor([sc_rows, rope_dim], dtype),  # type: ignore
         cos: T.Tensor([sc_rows, rope_dim], dtype),  # type: ignore
     ):
-        with T.Kernel(num_blocks, is_npu=True) as (cid, vid):
-            with T.Scope("V"):
-                x_half_ub = T.alloc_ub([row_per_vec, rope_dim], dtype)
-                x_ub = T.alloc_ub([row_per_vec, rope_dim], ACC_DTYPE)
-                sin_ub = T.alloc_ub([1, rope_dim], ACC_DTYPE)
-                sin_half_ub = T.alloc_ub([1, rope_dim], dtype)
-                cos_ub = T.alloc_ub([1, rope_dim], ACC_DTYPE)
-                cos_half_ub = T.alloc_ub([1, rope_dim], dtype)
-                sin_block_ub = T.alloc_ub([row_per_vec, rope_dim], ACC_DTYPE)
-                cos_block_ub = T.alloc_ub([row_per_vec, rope_dim], ACC_DTYPE)
-                x_rotate_ub = T.alloc_ub([row_per_vec, rope_dim], ACC_DTYPE)
-                out_ub = T.alloc_ub([row_per_vec, rope_dim], ACC_DTYPE)
-                out_half_ub = T.alloc_ub([row_per_vec, rope_dim], dtype)
-                mask_ub = T.alloc_ub([row_per_vec, rope_dim], MASK_DTYPE)
-                idx_ub = T.alloc_ub([row_per_vec, rope_dim], "int32")
-                ones_ub = T.alloc_ub([row_per_vec, rope_dim], "int16")
-                mask_ub_i16 = T.alloc_ub([row_per_vec, rope_dim], "int16")
-                mask_ub_f32 = T.alloc_ub([row_per_vec, rope_dim], "float32")
-                mask_ub_i32 = T.alloc_ub([row_per_vec, rope_dim], "int32")
-                sin_mask_ub = T.alloc_ub([1, rope_dim], ACC_DTYPE)
+        with T.Kernel(num_blocks, is_npu=True) as (cid, vid), T.Scope("V"):
+            x_half_ub = T.alloc_ub([row_per_vec, rope_dim], dtype)
+            x_ub = T.alloc_ub([row_per_vec, rope_dim], ACC_DTYPE)
+            sin_ub = T.alloc_ub([1, rope_dim], ACC_DTYPE)
+            sin_half_ub = T.alloc_ub([1, rope_dim], dtype)
+            cos_ub = T.alloc_ub([1, rope_dim], ACC_DTYPE)
+            cos_half_ub = T.alloc_ub([1, rope_dim], dtype)
+            sin_block_ub = T.alloc_ub([row_per_vec, rope_dim], ACC_DTYPE)
+            cos_block_ub = T.alloc_ub([row_per_vec, rope_dim], ACC_DTYPE)
+            x_rotate_ub = T.alloc_ub([row_per_vec, rope_dim], ACC_DTYPE)
+            out_ub = T.alloc_ub([row_per_vec, rope_dim], ACC_DTYPE)
+            out_half_ub = T.alloc_ub([row_per_vec, rope_dim], dtype)
+            idx_ub = T.alloc_ub([row_per_vec, rope_dim], "int32")
+            ones_ub = T.alloc_ub([row_per_vec, rope_dim], "int16")
+            mask_ub_i16 = T.alloc_ub([row_per_vec, rope_dim], "int16")
+            mask_ub_f32 = T.alloc_ub([row_per_vec, rope_dim], "float32")
+            mask_ub_i32 = T.alloc_ub([row_per_vec, rope_dim], "int32")
+            sin_mask_ub = T.alloc_ub([1, rope_dim], ACC_DTYPE)
 
-                # Gather offset generation (interleaved only)
-                if layout == "interleaved":
-                    T.tile.createvecindex(idx_ub, 0)
-                    T.copy(idx_ub, mask_ub_i16)
-                    T.tile.fill(ones_ub, 1)
-                    T.tile.bitwise_xor(mask_ub_i16, mask_ub_i16, ones_ub)
-                    T.copy(mask_ub_i16, mask_ub_f32)
-                    T.copy(mask_ub_f32, mask_ub_i32)
-                    T.tile.mul(mask_ub_i32, mask_ub_i32, 4)
-                    T.barrier_all()
-                    # Use mask_ub_i32 directly as gather offset (PTO accepts int32)
-
-                # sin_mask generation
-                T.tile.fill(sin_mask_ub, -1.0)
+            # Gather offset generation (interleaved only)
+            if layout == "interleaved":
+                T.tile.createvecindex(idx_ub, 0)
+                T.copy(idx_ub, mask_ub_i16)
+                T.tile.fill(ones_ub, 1)
+                T.tile.bitwise_xor(mask_ub_i16, mask_ub_i16, ones_ub)
+                T.copy(mask_ub_i16, mask_ub_f32)
+                T.copy(mask_ub_f32, mask_ub_i32)
+                T.tile.mul(mask_ub_i32, mask_ub_i32, 4)
                 T.barrier_all()
-                if layout == "interleaved":
-                    for i in T.serial(0, half):
-                        sin_mask_ub[0, 2 * i + 1] = 1.0
-                else:
-                    for i in T.serial(0, half):
-                        sin_mask_ub[0, half + i] = 1.0
+                # Use mask_ub_i32 directly as gather offset (PTO accepts int32)
 
-                # Chunk loop
-                for chunk in T.serial(0, chunks_per_block):
-                    chunk_idx = cid * chunks_per_block + chunk
-                    if chunk_idx < total_chunks:
-                        row_x = chunk_idx * block_M + vid * row_per_vec
-                        row_sin_cos = (row_x // head_num) % sc_rows
+            # sin_mask generation
+            T.tile.fill(sin_mask_ub, -1.0)
+            T.barrier_all()
+            if layout == "interleaved":
+                for i in T.serial(0, half):
+                    sin_mask_ub[0, 2 * i + 1] = 1.0
+            else:
+                for i in T.serial(0, half):
+                    sin_mask_ub[0, half + i] = 1.0
 
-                        # Load x
-                        if row_x + row_per_vec <= M:
-                            if dim_start == 0:
-                                T.copy(x[row_x : row_x + row_per_vec, :], x_half_ub)
-                            else:
-                                for i in T.serial(0, row_per_vec):
+            # Chunk loop
+            for chunk in T.serial(0, chunks_per_block):
+                chunk_idx = cid * chunks_per_block + chunk
+                if chunk_idx < total_chunks:
+                    row_x = chunk_idx * block_M + vid * row_per_vec
+                    row_sin_cos = (row_x // head_num) % sc_rows
+
+                    # Load x
+                    if row_x + row_per_vec <= M:
+                        if dim_start == 0:
+                            T.copy(x[row_x : row_x + row_per_vec, :], x_half_ub)
+                        else:
+                            for i in T.serial(0, row_per_vec):
+                                T.copy(x[row_x + i, dim_start:], x_half_ub[i, :])
+                    else:
+                        for i in T.serial(0, row_per_vec):
+                            if row_x + i < M:
+                                if dim_start == 0:
+                                    T.copy(x[row_x + i, :], x_half_ub[i, :])
+                                else:
                                     T.copy(x[row_x + i, dim_start:], x_half_ub[i, :])
+
+                    T.barrier_all()
+
+                    if need_cast:
+                        T.tile.cast(x_ub, x_half_ub, "CAST_NONE", x_elem_count)
+                    else:
+                        T.copy(x_half_ub, x_ub)
+
+                    # Load sin/cos
+                    T.copy(sin[row_sin_cos, :], sin_half_ub[0, :])
+                    T.copy(cos[row_sin_cos, :], cos_half_ub[0, :])
+                    T.barrier_all()
+                    if need_cast:
+                        T.tile.cast(sin_ub, sin_half_ub, "CAST_NONE", sc_elem_count)
+                        T.tile.cast(cos_ub, cos_half_ub, "CAST_NONE", sc_elem_count)
+                    else:
+                        T.copy(sin_half_ub, sin_ub)
+                        T.copy(cos_half_ub, cos_ub)
+
+                    T.barrier_all()
+
+                    # Apply sin_mask + broadcast
+                    T.tile.mul(sin_ub[0, :], sin_ub[0, :], sin_mask_ub[0, :])
+                    T.tile.broadcast(sin_block_ub, sin_ub)
+                    T.tile.broadcast(cos_block_ub, cos_ub)
+
+                    # Rotate x
+                    if layout == "interleaved":
+                        T.tile.gather(x_rotate_ub, x_ub, mask_ub_i32, 0)
+                    else:
+                        for i in T.serial(0, row_per_vec):
+                            T.copy(x_ub[i, half:], x_rotate_ub[i, :half])
+                            T.copy(x_ub[i, :half], x_rotate_ub[i, half:])
+
+                    # out = x * cos + x_rotate * sin_signed
+                    T.tile.mul(out_ub, x_ub, cos_block_ub)
+                    T.tile.mul(x_rotate_ub, x_rotate_ub, sin_block_ub)
+                    T.tile.add(out_ub, out_ub, x_rotate_ub)
+
+                    # Downcast
+                    if need_cast:
+                        T.tile.cast(out_half_ub, out_ub, "CAST_RINT", x_elem_count)
+                    else:
+                        T.copy(out_ub, out_half_ub)
+
+                    T.barrier_all()
+
+                    # Write back
+                    if row_x + row_per_vec <= M:
+                        if dim_start == 0:
+                            T.copy(out_half_ub, x[row_x : row_x + row_per_vec, :])
                         else:
                             for i in T.serial(0, row_per_vec):
-                                if row_x + i < M:
-                                    if dim_start == 0:
-                                        T.copy(x[row_x + i, :], x_half_ub[i, :])
-                                    else:
-                                        T.copy(x[row_x + i, dim_start:], x_half_ub[i, :])
-
-                        T.barrier_all()
-
-                        if need_cast:
-                            T.tile.cast(x_ub, x_half_ub, "CAST_NONE", x_elem_count)
-                        else:
-                            T.copy(x_half_ub, x_ub)
-
-                        # Load sin/cos
-                        T.copy(sin[row_sin_cos, :], sin_half_ub[0, :])
-                        T.copy(cos[row_sin_cos, :], cos_half_ub[0, :])
-                        T.barrier_all()
-                        if need_cast:
-                            T.tile.cast(sin_ub, sin_half_ub, "CAST_NONE", sc_elem_count)
-                            T.tile.cast(cos_ub, cos_half_ub, "CAST_NONE", sc_elem_count)
-                        else:
-                            T.copy(sin_half_ub, sin_ub)
-                            T.copy(cos_half_ub, cos_ub)
-
-                        T.barrier_all()
-
-                        # Apply sin_mask + broadcast
-                        T.tile.mul(sin_ub[0, :], sin_ub[0, :], sin_mask_ub[0, :])
-                        T.tile.broadcast(sin_block_ub, sin_ub)
-                        T.tile.broadcast(cos_block_ub, cos_ub)
-
-                        # Rotate x
-                        if layout == "interleaved":
-                            T.tile.gather(x_rotate_ub, x_ub, mask_ub_i32, 0)
-                        else:
-                            for i in T.serial(0, row_per_vec):
-                                T.copy(x_ub[i, half:], x_rotate_ub[i, :half])
-                                T.copy(x_ub[i, :half], x_rotate_ub[i, half:])
-
-                        # out = x * cos + x_rotate * sin_signed
-                        T.tile.mul(out_ub, x_ub, cos_block_ub)
-                        T.tile.mul(x_rotate_ub, x_rotate_ub, sin_block_ub)
-                        T.tile.add(out_ub, out_ub, x_rotate_ub)
-
-                        # Downcast
-                        if need_cast:
-                            T.tile.cast(out_half_ub, out_ub, "CAST_RINT", x_elem_count)
-                        else:
-                            T.copy(out_ub, out_half_ub)
-
-                        T.barrier_all()
-
-                        # Write back
-                        if row_x + row_per_vec <= M:
-                            if dim_start == 0:
-                                T.copy(out_half_ub, x[row_x : row_x + row_per_vec, :])
-                            else:
-                                for i in T.serial(0, row_per_vec):
+                                T.copy(out_half_ub[i, :], x[row_x + i, dim_start:])
+                    else:
+                        for i in T.serial(0, row_per_vec):
+                            if row_x + i < M:
+                                if dim_start == 0:
+                                    T.copy(out_half_ub[i, :], x[row_x + i, :])
+                                else:
                                     T.copy(out_half_ub[i, :], x[row_x + i, dim_start:])
-                        else:
-                            for i in T.serial(0, row_per_vec):
-                                if row_x + i < M:
-                                    if dim_start == 0:
-                                        T.copy(out_half_ub[i, :], x[row_x + i, :])
-                                    else:
-                                        T.copy(out_half_ub[i, :], x[row_x + i, dim_start:])
 
     return kernel
 
