@@ -118,6 +118,7 @@ def main():
     args = parser.parse_args()
 
     compile_rope(args.shape, args.layout, args.dtype, args.target, args.platform, args.output)
+    print("Test Passed!")
 
     if args.test:
         test_rope(args.shape, args.layout, args.dtype, args.output)
