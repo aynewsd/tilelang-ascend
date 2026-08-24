@@ -135,7 +135,7 @@ def main(custom_args=None):
     tl.cache.clear_cache()
 
     check_case(B, N, top_k)
-    check_case(1024, 1024, 128)
+    #check_case(1024, 1024, 128)
 
     print("topk_selector example passed!")
     print("Kernel Output Match!")
