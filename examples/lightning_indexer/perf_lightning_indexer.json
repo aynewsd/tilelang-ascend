@@ -1,0 +1,166 @@
+[
+  {
+    "config": {
+      "B": 2,
+      "S1": 512,
+      "S2": 512,
+      "G": 32,
+      "N2": 1,
+      "D": 128,
+      "top_k": 1024,
+      "warm_up": 0,
+      "launch_count": 10
+    },
+    "baseline": {
+      "n_instances": 10,
+      "task_duration_min_us": 93.580002,
+      "task_duration_median_us": 94.52000000000001,
+      "task_duration_mean_us": 94.4459999,
+      "task_duration_max_us": 95.18,
+      "block_dim": 24,
+      "op_type": "mix",
+      "kernel_name": "LightningIndexer_468c104183baa47aac33ce774c8668e0_196865_mix_aic",
+      "cube_ratio": 14.838750000000001,
+      "mte2_ratio": 11.4983,
+      "vec_ratio": 0.0,
+      "l2_read_hit_rate": 66.3955725
+    },
+    "tilelang": {
+      "n_instances": 10,
+      "task_duration_min_us": 5106.52002,
+      "task_duration_median_us": 5134.670166,
+      "task_duration_mean_us": 5137.1020508,
+      "task_duration_max_us": 5164.319824,
+      "block_dim": 2,
+      "op_type": "mix",
+      "kernel_name": "main_kernel",
+      "cube_ratio": 3.68685,
+      "mte2_ratio": 15.636950000000002,
+      "vec_ratio": 0.0,
+      "l2_read_hit_rate": 96.679131
+    }
+  },
+  {
+    "config": {
+      "B": 2,
+      "S1": 512,
+      "S2": 1024,
+      "G": 32,
+      "N2": 1,
+      "D": 128,
+      "top_k": 1024,
+      "warm_up": 0,
+      "launch_count": 10
+    },
+    "baseline": {
+      "n_instances": 10,
+      "task_duration_min_us": 141.720001,
+      "task_duration_median_us": 143.1299975,
+      "task_duration_mean_us": 142.986,
+      "task_duration_max_us": 144.139999,
+      "block_dim": 24,
+      "op_type": "mix",
+      "kernel_name": "LightningIndexer_468c104183baa47aac33ce774c8668e0_196865_mix_aic",
+      "cube_ratio": 17.47745,
+      "mte2_ratio": 11.3222,
+      "vec_ratio": 0.0,
+      "l2_read_hit_rate": 82.136383
+    },
+    "tilelang": {
+      "n_instances": 10,
+      "task_duration_min_us": 10078.620117,
+      "task_duration_median_us": 10147.040039,
+      "task_duration_mean_us": 10148.1360352,
+      "task_duration_max_us": 10201.139648,
+      "block_dim": 2,
+      "op_type": "mix",
+      "kernel_name": "main_kernel",
+      "cube_ratio": 3.73135,
+      "mte2_ratio": 15.480150000000002,
+      "vec_ratio": 0.0,
+      "l2_read_hit_rate": 98.241905
+    }
+  },
+  {
+    "config": {
+      "B": 2,
+      "S1": 512,
+      "S2": 2048,
+      "G": 32,
+      "N2": 1,
+      "D": 128,
+      "top_k": 1024,
+      "warm_up": 0,
+      "launch_count": 10
+    },
+    "baseline": {
+      "n_instances": 10,
+      "task_duration_min_us": 234.660004,
+      "task_duration_median_us": 236.41999850000002,
+      "task_duration_mean_us": 236.25400100000002,
+      "task_duration_max_us": 238.360001,
+      "block_dim": 24,
+      "op_type": "mix",
+      "kernel_name": "LightningIndexer_468c104183baa47aac33ce774c8668e0_196865_mix_aic",
+      "cube_ratio": 21.15155,
+      "mte2_ratio": 10.047049999999999,
+      "vec_ratio": 0.0,
+      "l2_read_hit_rate": 89.99453
+    },
+    "tilelang": {
+      "n_instances": 10,
+      "task_duration_min_us": 20561.160156,
+      "task_duration_median_us": 20628.229492,
+      "task_duration_mean_us": 20645.8660154,
+      "task_duration_max_us": 20797.320312,
+      "block_dim": 2,
+      "op_type": "mix",
+      "kernel_name": "main_kernel",
+      "cube_ratio": 3.67085,
+      "mte2_ratio": 15.273599999999998,
+      "vec_ratio": 0.0,
+      "l2_read_hit_rate": 98.82798
+    }
+  },
+  {
+    "config": {
+      "B": 2,
+      "S1": 512,
+      "S2": 4096,
+      "G": 32,
+      "N2": 1,
+      "D": 128,
+      "top_k": 1024,
+      "warm_up": 0,
+      "launch_count": 10
+    },
+    "baseline": {
+      "n_instances": 10,
+      "task_duration_min_us": 408.220001,
+      "task_duration_median_us": 408.98999000000003,
+      "task_duration_mean_us": 408.9100004,
+      "task_duration_max_us": 409.839996,
+      "block_dim": 24,
+      "op_type": "mix",
+      "kernel_name": "LightningIndexer_468c104183baa47aac33ce774c8668e0_196865_mix_aic",
+      "cube_ratio": 23.67345,
+      "mte2_ratio": 9.96595,
+      "vec_ratio": 0.0,
+      "l2_read_hit_rate": 93.770962
+    },
+    "tilelang": {
+      "n_instances": 10,
+      "task_duration_min_us": 41929.019531,
+      "task_duration_median_us": 42231.390625,
+      "task_duration_mean_us": 42207.8765625,
+      "task_duration_max_us": 42628.199219,
+      "block_dim": 2,
+      "op_type": "mix",
+      "kernel_name": "main_kernel",
+      "cube_ratio": 3.5860000000000003,
+      "mte2_ratio": 15.016499999999999,
+      "vec_ratio": 0.0,
+      "l2_read_hit_rate": 99.023369
+    }
+  }
+]
