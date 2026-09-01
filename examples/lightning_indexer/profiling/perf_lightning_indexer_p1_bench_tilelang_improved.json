@@ -1,0 +1,57 @@
+{
+  "target": "bench_tilelang_improved.py",
+  "results": [
+    {
+      "config": {
+        "B": 2,
+        "S1": 512,
+        "S2": 4096,
+        "G": 32,
+        "N2": 1,
+        "D": 128,
+        "top_k": 1024,
+        "warm_up": 0,
+        "launch_count": 1
+      },
+      "target_run": {
+        "status": "timeout",
+        "returncode": -15,
+        "stdout": "[WARN]  The option \"--application\" will be deprecated in future version. It is recommended to specify <app> [arguments] instead.\n[WARN]  Currently, the root permission is used, which is unrecommended. Please ensure the security of the execution environment and programs.\n[INFO]  Op profiling analysis start.\n[INFO]  Running device task: DeviceProf\n[INFO] <ProfData> Start profiling on device 0, kernel: main_kernel\n[WARN] <ReplayOnce> Kernel run on device 0 No. 1 time failed.\n",
+        "stderr": "",
+        "message": "msprof \u5728 90s \u540e\u8d85\u65f6\uff0c\u5df2\u7ec8\u6b62\u8fdb\u7a0b\u7ec4"
+      },
+      "target": null,
+      "baseline_reference": {
+        "n_instances": 10,
+        "task_duration_min_us": 408.220001,
+        "task_duration_median_us": 408.98999000000003,
+        "task_duration_mean_us": 408.9100004,
+        "task_duration_max_us": 409.839996,
+        "block_dim": 24,
+        "op_type": "mix",
+        "kernel_name": "LightningIndexer_468c104183baa47aac33ce774c8668e0_196865_mix_aic",
+        "cube_ratio": 23.67345,
+        "mte2_ratio": 9.96595,
+        "vec_ratio": 0.0,
+        "l2_read_hit_rate": 93.770962
+      },
+      "baseline_compatibility": {
+        "compatible": false,
+        "caveats": [
+          "\u5386\u53f2 baseline \u7684 msprof launch-count \u8bbe\u7f6e\u4e0d\u540c"
+        ],
+        "legacy_config": {
+          "B": 2,
+          "S1": 512,
+          "S2": 4096,
+          "G": 32,
+          "N2": 1,
+          "D": 128,
+          "top_k": 1024,
+          "warm_up": 0,
+          "launch_count": 10
+        }
+      }
+    }
+  ]
+}
