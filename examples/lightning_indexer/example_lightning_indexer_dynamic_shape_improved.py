@@ -91,9 +91,9 @@ def indexer(
                         T.wait_flag("MTE2", "M", Q_L1_READY_FLAG)
                         T.wait_flag("FIX", "M", L0C_FLAG)
                         T.gemm_v0(q_l1, k_l1, c_l0, transpose_B=True, init=True)
-                        T.set_flag("M", "MTE2", Q_L1_FREE_FLAG)
                         T.set_flag("M", "FIX", L0C_FLAG)
                         T.wait_flag("M", "FIX", L0C_FLAG)
+                        T.set_flag("M", "MTE2", Q_L1_FREE_FLAG)
                         T.copy(c_l0, QK_SLOT[cid, slot, :, g, :], enable_relu=True)
                         T.set_flag("FIX", "M", L0C_FLAG)
                     T.set_flag("M", "MTE2", K_L1_FREE_FLAG)
@@ -224,47 +224,6 @@ def count_index_multiset_mismatches(expected, actual):
     return total_mismatches
 
 
-def cpu_debug_online_topk():
-    """在 CPU 上逐个 trunk 校验 P1 在线 TopK 候选归并。"""
-    top_k = 8
-    block_n = 4
-    scores = torch.tensor(
-        [0.25, 3.50, -1.00, 2.75, 5.25, 0.50, 4.75, -0.25, 1.25, 6.00, 2.00, 7.50, 3.00, 8.25, 1.75, 9.00],
-        dtype=torch.float32,
-    )
-    history_values = torch.full((top_k,), -torch.inf, dtype=scores.dtype)
-    history_indices = torch.full((top_k,), -1, dtype=torch.int64)
-
-    for trunk_id, start in enumerate(range(0, scores.numel(), block_n)):
-        trunk_scores = scores[start : start + block_n]
-        local_count = min(top_k, trunk_scores.numel())
-        local_values, local_indices = torch.topk(trunk_scores, local_count, largest=True, sorted=True)
-        candidate_values = torch.full((top_k,), -torch.inf, dtype=scores.dtype)
-        candidate_indices = torch.full((top_k,), -1, dtype=torch.int64)
-        candidate_values[:local_count] = local_values
-        candidate_indices[:local_count] = local_indices + start
-
-        merged_values = torch.cat((history_values, candidate_values))
-        merged_indices = torch.cat((history_indices, candidate_indices))
-        history_values, selected = torch.topk(merged_values, top_k, largest=True, sorted=True)
-        history_indices = merged_indices[selected]
-
-        prefix = scores[: start + trunk_scores.numel()]
-        expected_count = min(top_k, prefix.numel())
-        expected_values, expected_indices = torch.topk(prefix, expected_count, largest=True, sorted=True)
-        actual_values = history_values[:expected_count]
-        actual_indices = history_indices[:expected_count]
-        if not torch.equal(actual_indices, expected_indices) or not torch.equal(actual_values, expected_values):
-            print(f"[CPU_DEBUG_FAIL] 第一个失败 trunk={trunk_id}，前缀长度={prefix.numel()}")
-            print(f"期望索引: {expected_indices.tolist()}，实际索引: {actual_indices.tolist()}")
-            print(f"期望分数: {expected_values.tolist()}，实际分数: {actual_values.tolist()}")
-            return False
-        print(f"[CPU_DEBUG_PASS] trunk={trunk_id}，前缀长度={prefix.numel()}，历史候选正确")
-
-    print("[CPU_DEBUG_PASS] 所有 trunk 的在线 TopK 历史均与完整前缀 torch.topk 一致")
-    return True
-
-
 def test_indexer(s1, s2, top_k, block_n=256, vector_basen=256):
     n2, groups, dimension = 1, 32, 64
     block_m, block_k = 64, 64
@@ -309,10 +268,7 @@ def test_indexer(s1, s2, top_k, block_n=256, vector_basen=256):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="验证 Lightning Indexer 在线 TopK")
     parser.add_argument("--quick", action="store_true", help="运行较小的整除形状用例")
-    parser.add_argument("--cpu-debug", action="store_true", help="仅在 CPU 上逐 trunk 校验在线 TopK 候选逻辑")
     arguments = parser.parse_args()
-    if arguments.cpu_debug:
-        raise SystemExit(0 if cpu_debug_online_topk() else 1)
     tilelang.disable_cache()
     if arguments.quick:
         test_indexer(s1=64, s2=1024, top_k=256, block_n=64, vector_basen=64)

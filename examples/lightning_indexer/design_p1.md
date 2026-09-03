@@ -7,6 +7,18 @@
 - 目标平台：A3
 - 范围：仅实施 P1 流水优化。由于 A3 不提供该硬件路径，P0（L0C Fixpipe 直接写 UB）不在范围内。
 
+## 当前验证结论
+
+- 当前保留稳定的 Expert 在线 TopK 实现：`threads=1`、256 宽 trunk、独立排序和选中结果缓冲区。
+- 保留已验证的低风险修复：Q L1 在 GEMM 完成后归还，S2 循环外不追加无后继的 L1 drain wait。
+- 目标脚本只启动一次 kernel；重复次数由 `msprof` 的 `--warm-up` 与 `--launch-count` 控制。当前没有有效的 P1 `Task Duration`，不能宣称性能收益。
+
+## 当前验证结论
+
+- 当前稳定实现保留 `threads=1`、256 宽 trunk、独立排序与选中结果缓冲区；未采用后续实验中的 UB 激进复用和设备 DumpTensor 探针。
+- 已验证的低风险修复包括：Q L1 仅在 GEMM 完成后归还、移除 S2 循环结束后的无后继 L1 drain wait，以及避免两个 AIV 同时执行未按 `vid` 切分的 Vector 路径。
+- `msprof` 目标脚本只启动一次 kernel；重复次数由 `--warm-up` 和 `--launch-count` 控制。此前采集没有产生有效 P1 `Task Duration`，因此当前不能宣称性能收益。
+
 ## 基线评估
 
 当前 kernel 为每个 `(B, N2, S1 tile)` 分配一个 Cube/Vector 对。
@@ -88,8 +100,21 @@ GEMM 前对该 G 的 Q GM→L1 DMA 执行独立的 `MTE2→M` 等待。每次 hi
    `Q_L1_FREE_FLAG` 归还 `q_l1`，下一组才能装载 Q。
 3. 归还令牌只由 M 发送、只由 MTE2 等待；M 不等待归还令牌。因此不会形成 M 等待 MTE2、而
     MTE2 又等待 M 的循环。L0C 的 `FIX→M`、`M→FIX` 顺序及 QK 槽的跨核协议保持不变。
-    L1 空闲令牌只在下一次对应的 GM→L1 DMA 前由 MTE2 消费；S2 循环结束时不再额外等待或
+     L1 空闲令牌只在下一次对应的 GM→L1 DMA 前由 MTE2 消费；S2 循环结束时不再额外等待或
     清空这些令牌。
+
+#### L1 末尾 drain 修正
+
+曾经在 S2 循环结束后追加以下等待：
+
+```python
+T.wait_flag("M", "MTE2", K_L1_FREE_FLAG)
+T.wait_flag("M", "MTE2", Q_L1_FREE_FLAG)
+```
+
+这些等待位于最后一次生产之后，循环已经没有下一次 GM 到 L1 的消费者。它们不再提供可复用缓冲区所需的顺序约束，却可能让 Cube 等待一个没有后继业务的事件，导致 C/V 流水无法正常退出并表现为 `507014`。正确做法是保留每次下一轮 DMA 前的空闲等待，以及 GEMM 消费完成后的 `M -> MTE2` 归还；只删除循环外的两条终止等待。
+
+此外，Q L1 的归还必须位于 `M -> FIX` 的 GEMM 完成等待之后。若在 `gemm_v0` 发射后立即归还，下一次 Q DMA 可能覆盖仍被 Cube 读取的 L1 数据。
 
 ### 在线候选状态
 
@@ -108,6 +133,10 @@ merged_values_and_indices[4 * TOP_K]
 ```
 
 昇腾 AIV 的 `MrgSort` 要求两个输入源的元素数量相等。局部静态块排序生成交错的 `(score, local_index)` lane；随后对整个交错块加 `n * BLOCK_N`，使索引成为全局 S2 索引。每次排序并完成索引偏移后，先将 `2 * TOP_K` lane 的 trunk UB 缓冲区全部填为 `-inf`，再把有效的 `2 * BLOCK_N` lane 拷贝到其前缀。这样历史源和 trunk 源均以 `(TOP_K, TOP_K)` 元素配置进入归并，归并输出缓冲区须容纳 `4 * TOP_K` scalar lane。填充和拷贝完成后、归并前，以及归并完成后、历史写回前，均使用 V 管线屏障隔离生产者和消费者。第一个 trunk 不读取未初始化的 GM history，而是在 UB 将交错 history lane 全部填为 `-inf`；每次 merge 后将前 `2 * TOP_K` lane 写回该行 workspace。最终读取最后一份 history，用 `P1010` 抽取索引并转换为 `int32`。
+
+### 目录与性能脚本约定
+
+性能目标脚本统一放在 `perf/`，历史和新采集结果放在 `profiling/`。`msprof_run.py` 只运行命令行指定的目标脚本，并复用 `profiling/perf_lightning_indexer.json` 中已有的 baseline，不重复执行 baseline。目标脚本本身不得再实现应用侧重复 launch，避免把 warmup、采样和应用循环叠加。
 
 ### P1 默认 trunk 宽度
 

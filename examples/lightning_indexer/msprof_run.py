@@ -10,7 +10,6 @@ import argparse
 import csv
 import json
 import os
-import signal
 import shutil
 import subprocess
 import sys
@@ -163,8 +162,8 @@ def aggregate_metrics(all_metrics, label):
     return summary
 
 
-def run_msprof(target_script, target_args, output_subdir, warm_up, launch_count, kernel_name=None, timeout=120):
-    """运行 msprof op，并在超时时终止整个进程组。"""
+def run_msprof(target_script, target_args, output_subdir, warm_up, launch_count, kernel_name=None):
+    """运行 msprof op，并保留完整的运行时错误输出。"""
     output_path = os.path.join(OUTPUT_DIR, output_subdir)
     if os.path.exists(output_path):
         shutil.rmtree(output_path, ignore_errors=True)
@@ -185,28 +184,13 @@ def run_msprof(target_script, target_args, output_subdir, warm_up, launch_count,
 
     print(f"  运行: msprof op --application=python {os.path.basename(target_script)} {target_args}")
     try:
-        process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
-        )
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            print(f"  [错误] msprof 在 {timeout}s 后超时，正在终止整个进程组")
-            os.killpg(process.pid, signal.SIGTERM)
-            try:
-                stdout, stderr = process.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                print("  [错误] SIGTERM 后进程组仍未退出，发送 SIGKILL")
-                os.killpg(process.pid, signal.SIGKILL)
-                stdout, stderr = process.communicate()
-            return {"status": "timeout", "returncode": process.returncode, "stdout": stdout,
-                    "stderr": stderr, "message": f"msprof 在 {timeout}s 后超时，已终止进程组"}
-        if process.returncode != 0:
-            print(f"  [错误] msprof 以退出码 {process.returncode} 结束")
-            if stderr:
-                print(f"  stderr（末尾 500 字符）: {stderr[-500:]}")
-            return {"status": "failed", "returncode": process.returncode, "stdout": stdout,
-                    "stderr": stderr, "message": "msprof 非零退出"}
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"  [错误] msprof 以退出码 {result.returncode} 结束")
+            if result.stderr:
+                print(f"  stderr（末尾 500 字符）: {result.stderr[-500:]}")
+            return {"status": "failed", "returncode": result.returncode, "stdout": result.stdout,
+                    "stderr": result.stderr, "message": "msprof 非零退出"}
     except FileNotFoundError:
         print("  [错误] 未找到 msprof 命令")
         return {"status": "failed", "returncode": None, "message": "未找到 msprof 命令"}
@@ -215,9 +199,9 @@ def run_msprof(target_script, target_args, output_subdir, warm_up, launch_count,
     if not opprof_dir:
         message = f"{output_path} 下未找到 OPPROF_* 目录"
         print(f"  [错误] {message}")
-        return {"status": "failed", "returncode": process.returncode, "message": message}
+        return {"status": "failed", "returncode": result.returncode, "message": message}
 
-    return {"status": "success", "returncode": process.returncode, "opprof_dir": opprof_dir}
+    return {"status": "success", "returncode": result.returncode, "opprof_dir": opprof_dir}
 
 
 def resolve_target(target):
@@ -278,7 +262,6 @@ def run_one_config(
     warm_up,
     launch_count,
     kernel_name,
-    timeout,
 ):
     """只采集一个目标脚本，并关联已有历史 baseline。"""
     config_name = f"B{B}_S1{S1}_S2{S2}_G{G}_D{D}_K{top_k}"
@@ -303,7 +286,6 @@ def run_one_config(
         warm_up,
         launch_count,
         kernel_name=kernel_name,
-        timeout=timeout,
     )
     target_opprof = target_run.get("opprof_dir")
     target_raw = parse_metrics(target_opprof, target_label) if target_run["status"] == "success" else None
@@ -349,7 +331,7 @@ def generate_markdown(results, output_path, target_name):
     lines.append("- 仅执行本次 `--target`，不会运行或刷新 baseline。")
     lines.append("- 目标脚本每次执行仅启动一次 kernel，不提供应用侧重复控制。")
     lines.append("- msprof 的 warmup 与采样次数分别由 `--warm-up`、`--launch-count` 显式控制。")
-    lines.append("- `--timeout` 超时会终止 msprof 及其启动的整个进程组，并记录失败状态。")
+    lines.append("- msprof 发生异常时保留其完整输出，便于分析设备报错与运行时日志。")
     lines.append("- 历史 baseline 仅来自 `perf_lightning_indexer.json`，并按配置标记可比性。")
     lines.append("")
 
@@ -455,13 +437,10 @@ def main():
     parser.add_argument("--top-k", type=int, default=1024)
     parser.add_argument("--warm-up", type=int, default=5)
     parser.add_argument("--launch-count", type=int, default=10)
-    parser.add_argument("--timeout", type=int, default=120, help="msprof 最大运行秒数；默认 120")
     parser.add_argument("--preset", default="default", choices=["default", "sweep"])
     parser.add_argument("--dry-run", action="store_true", help="仅检查目标与历史 baseline 匹配，不启动 msprof")
     args = parser.parse_args()
 
-    if args.timeout < 1:
-        parser.error("--timeout 必须至少为 1")
     try:
         target_script = resolve_target(args.target)
     except ValueError as error:
@@ -490,7 +469,7 @@ def main():
                 run_one_config(
                     target_script, target_label, legacy_results, args.B, args.S1, s2, args.G,
                     args.N2, args.D, args.top_k, args.warm_up, args.launch_count,
-                    args.kernel_name, args.timeout,
+                    args.kernel_name,
                 )
             )
     else:
@@ -498,7 +477,7 @@ def main():
             run_one_config(
                 target_script, target_label, legacy_results, args.B, args.S1, args.S2, args.G,
                 args.N2, args.D, args.top_k, args.warm_up, args.launch_count,
-                args.kernel_name, args.timeout,
+                args.kernel_name,
             )
         )
 

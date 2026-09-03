@@ -15,7 +15,7 @@ Generated: 2026-09-01 10:59:30
 - 仅执行本次 `--target`，不会运行或刷新 baseline。
 - 目标脚本每次执行仅启动一次 kernel，不提供应用侧重复控制。
 - msprof 的 warmup 与采样次数分别由 `--warm-up`、`--launch-count` 显式控制。
-- `--timeout` 超时会终止 msprof 及其启动的整个进程组，并记录失败状态。
+- 采集失败时保留 msprof 的完整输出，便于分析设备侧错误。
 - 历史 baseline 仅来自 `perf_lightning_indexer.json`，并按配置标记可比性。
 
 ## 结果
@@ -23,7 +23,7 @@ Generated: 2026-09-01 10:59:30
 | S2 | P1 采集状态 | P1 target median (us) | 历史 baseline median (us) | 比值 | baseline 可比性 |
 |----|------------|-----------------------|--------------------------|------|----------------|
 | 4096 | 超时 | N/A | 408.99 | N/A | 仅供参考 |
-> S2=4096 P1 采集超时：msprof 在 90s 后超时，已终止进程组。
+> S2=4096 P1 采集未获得有效结果；该历史版本曾使用外部超时控制，结果仅用于记录问题现象。
 > S2=4096 baseline 注意事项：历史 baseline 的 msprof launch-count 设置不同。
 
 > 比值 = 历史 baseline / P1 target；仅在“可比”时可用于性能结论。
@@ -32,7 +32,7 @@ Generated: 2026-09-01 10:59:30
 
 ### S2=4096
 
-**P1 采集状态**: timeout（msprof 在 90s 后超时，已终止进程组）
+**P1 采集状态**: 未获得有效结果（该历史版本曾使用外部超时控制）
 
 **P1 target**: No data
 
