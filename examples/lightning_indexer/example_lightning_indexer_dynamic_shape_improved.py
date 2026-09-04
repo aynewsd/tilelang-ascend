@@ -36,16 +36,17 @@ def indexer(
     TASK_COUNT = B * N2 * S1_TILES
     READY_FLAG = 0
     FREE_FLAG = 2
-    G_REDUCE_FLAG = 6
-    SLOT_RELEASE_FLAG = 8
-    L0C_FLAG = 10
-    K_L1_READY_FLAG = 12
-    Q_L1_READY_FLAG = 14
-    OUTPUT_READY_FLAG = 16
-    HISTORY_LOAD_FLAG = 18
-    HISTORY_STORE_FLAG = 20
-    K_L1_FREE_FLAG = 22
-    Q_L1_FREE_FLAG = 24
+    # 本地事件 ID 按有向管线对独立分配，910B/A3 的合法范围为 0 到 7。
+    L0C_FLAG = 1  # 避免与 GEMM 内部使用的事件 ID 0 混淆。
+    K_L1_READY_FLAG = 0
+    Q_L1_READY_FLAG = 1
+    OUTPUT_READY_FLAG = 1
+    HISTORY_LOAD_FLAG = 1
+    HISTORY_STORE_FLAG = 0
+    K_L1_FREE_FLAG = 0
+    Q_L1_FREE_FLAG = 1
+    G_REDUCE_FLAG = 0
+    SLOT_RELEASE_FLAG = 2
 
     @T.prim_func
     def main(

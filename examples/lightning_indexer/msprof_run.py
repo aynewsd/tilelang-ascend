@@ -201,6 +201,16 @@ def run_msprof(target_script, target_args, output_subdir, warm_up, launch_count,
         print(f"  [错误] {message}")
         return {"status": "failed", "returncode": result.returncode, "message": message}
 
+    if not find_kernel_dirs(opprof_dir):
+        message = f"{opprof_dir} 下未找到有效 kernel 目录"
+        print(f"  [错误] {message}")
+        return {
+            "status": "failed",
+            "returncode": result.returncode,
+            "opprof_dir": opprof_dir,
+            "message": message,
+        }
+
     return {"status": "success", "returncode": result.returncode, "opprof_dir": opprof_dir}
 
 

@@ -11,6 +11,7 @@
 
 - 当前保留稳定的 Expert 在线 TopK 实现：`threads=1`、256 宽 trunk、独立排序和选中结果缓冲区。
 - 保留已验证的低风险修复：Q L1 在 GEMM 完成后归还，S2 循环外不追加无后继的 L1 drain wait。
+- 本地事件 ID 已按有向管线对重编码到 `0..2`；quick 与 `B=1,D=64` 默认精度通过，但 `B=2,D=128` 单次 benchmark 仍出现 `507014`，问题已从普通 flag ID 越界收敛到大配置的 AICore/AIV 运行时异常。
 - 目标脚本只启动一次 kernel；重复次数由 `msprof` 的 `--warm-up` 与 `--launch-count` 控制。当前没有有效的 P1 `Task Duration`，不能宣称性能收益。
 
 ## 当前验证结论
@@ -18,6 +19,41 @@
 - 当前稳定实现保留 `threads=1`、256 宽 trunk、独立排序与选中结果缓冲区；未采用后续实验中的 UB 激进复用和设备 DumpTensor 探针。
 - 已验证的低风险修复包括：Q L1 仅在 GEMM 完成后归还、移除 S2 循环结束后的无后继 L1 drain wait，以及避免两个 AIV 同时执行未按 `vid` 切分的 Vector 路径。
 - `msprof` 目标脚本只启动一次 kernel；重复次数由 `--warm-up` 和 `--launch-count` 控制。此前采集没有产生有效 P1 `Task Duration`，因此当前不能宣称性能收益。
+
+## 本地事件 ID 重编码
+
+TileLang 的普通 `set_flag/wait_flag` 会直接生成 AscendC `HardEvent` 事件调用。A3/DAV 2201
+的本地事件表按有向管线对独立分配，每个管线对的 ID 合法范围为 `0..7`，不能把 ID 作为
+全局编号递增。当前实现按管线对复用小范围 ID：
+
+```text
+ FIX -> M       : L0C=1
+ M -> FIX       : L0C=1
+MTE2 -> M      : K ready=0, Q ready=1
+M -> MTE2      : K free=0, Q free=1
+V -> MTE2      : G reduce=0, history load=1, slot release=2
+MTE2 -> V      : G ready=0, history ready=1
+V -> MTE3      : history store=0, output=1
+MTE3 -> V      : history store=0, output=1
+```
+
+跨核 `READY/FREE` 使用独立 namespace，当前只使用 `0..3`；不能用普通本地事件 ID 的规则
+直接替代跨核 flag 的判断。每次修改事件表后都必须检查生成 AscendC，而不能只检查 Python
+常量。
+
+### 与 DeepSeek V4 实现的同步差异
+
+参考实现 `examples/deepseek_v4/lightning_indexer.py:573` 使用 `MIX_AIC_1_2`，即一个 AIC
+配两个 AIV，并在 `:847-850` 通过 `vid` 将 S1 行切分给两个 AIV。它使用固定的
+`SYNC_C1V1=0` 和 `SYNC_V1C1=1`（`:476-478`），但每个物理 `cid` 只处理自己通过
+`_real_start/_real_end` 划分的任务区（`:653-656`）。
+
+当前实现使用 `MIX_AIC_1_1`（`threads=1`），不能直接照搬两个 AIV 的计数假设；当前
+Vector 路径不使用 `vid`，所有 history、QK 槽和输出均按单个 task 处理。`mode=2` 的公开
+语义是同组 AIC 与 AIV 同步，并没有文档证明必须存在两个 AIV；但 DAV2201 的跨核消息只
+编码 mode 和 flagId，不编码 cid，故固定 `READY/FREE` 在多 task 下的隔离依赖运行时拓扑，
+不能仅由 flag 数值合法性证明安全。未来若改回 `threads=2`，必须同时完成 vid 分工、初始
+FREE token 计数和每个 AIV 的 workspace/输出范围切分。
 
 ## 基线评估
 
@@ -89,7 +125,7 @@ GEMM 前对该 G 的 Q GM→L1 DMA 执行独立的 `MTE2→M` 等待。每次 hi
 #### L1 所有权生命周期
 
 `k_l1` 和 `q_l1` 都是单缓冲，MTE2 不能在 M 仍读取时重写。使用独立的
-`K_L1_FREE_FLAG=22` 和 `Q_L1_FREE_FLAG=24` 作为 `M→MTE2` 的归还令牌；二者在 S2
+`K_L1_FREE_FLAG=0` 和 `Q_L1_FREE_FLAG=1` 作为 `M→MTE2` 的归还令牌；二者在 S2
 循环开始前各建立一次初始空闲令牌。
 
 1. 每个 K trunk：MTE2 先等待 `K_L1_FREE_FLAG`，再执行 `GM→k_l1`；DMA 完成后以既有

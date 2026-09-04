@@ -10,15 +10,14 @@
         "N2": 1,
         "D": 128,
         "top_k": 1024,
-        "warm_up": 0,
-        "launch_count": 1
+        "warm_up": 3,
+        "launch_count": 5
       },
       "target_run": {
-        "status": "timeout",
-        "returncode": -15,
-        "stdout": "[WARN]  The option \"--application\" will be deprecated in future version. It is recommended to specify <app> [arguments] instead.\n[WARN]  Currently, the root permission is used, which is unrecommended. Please ensure the security of the execution environment and programs.\n[INFO]  Op profiling analysis start.\n[INFO]  Running device task: DeviceProf\n[INFO] <ProfData> Start profiling on device 0, kernel: main_kernel\n[WARN] <ReplayOnce> Kernel run on device 0 No. 1 time failed.\n",
-        "stderr": "",
-        "message": "msprof \u5728 90s \u540e\u8d85\u65f6\uff0c\u5df2\u7ec8\u6b62\u8fdb\u7a0b\u7ec4"
+        "status": "failed",
+        "returncode": 0,
+        "opprof_dir": "/root/workspace/tilelang-ascend/examples/lightning_indexer/msprof_output/p1_bench_tilelang_improved_B2_S1512_S24096_G32_D128_K1024/OPPROF_20260904105302_VACEXDSHXRTFHXVU",
+        "message": "OPPROF 目录下未找到有效 kernel 目录；目标应用实际触发 507014 AICore timeout"
       },
       "target": null,
       "baseline_reference": {
@@ -38,6 +37,7 @@
       "baseline_compatibility": {
         "compatible": false,
         "caveats": [
+          "\u5386\u53f2 baseline \u7684 msprof warm-up \u8bbe\u7f6e\u4e0d\u540c",
           "\u5386\u53f2 baseline \u7684 msprof launch-count \u8bbe\u7f6e\u4e0d\u540c"
         ],
         "legacy_config": {
